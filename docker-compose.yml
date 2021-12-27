@@ -1,0 +1,160 @@
+version: '3.8'
+
+networks:
+  mysql:
+    driver: ${NETWORKS_DRIVER}
+  elk:
+    driver: ${NETWORKS_DRIVER}
+  graylog:
+    driver: ${NETWORKS_DRIVER}
+volumes:
+  mysql:
+    driver: ${VOLUMES_DRIVER}
+  mongo:
+    driver: ${VOLUMES_DRIVER}
+  elasticsearch:
+    driver: ${VOLUMES_DRIVER}
+  graylog:
+    driver: ${VOLUMES_DRIVER}
+services:
+  mysql:
+    image: mysql:8
+    command: --default-authentication-plugin=mysql_native_password --slow-query-log=1 --long-query-time=2 --slow-query-log-file=/var/log/mysql/mysql-slow.log
+    container_name: mysql
+    restart: always
+    environment:
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+    ports:
+      - "${MYSQL_PORT}:3306"
+    volumes:
+      - ./volume/data/mysql:/var/lib/mysql
+      - ./volume/logs/mysql:/var/log/mysql
+    networks:
+      - mysql
+  mysql_seeding:
+    build: ./docker/mysql-seeding
+    container_name: mysql_seeding
+    depends_on:
+      - mysql
+    networks:
+      - mysql
+  filebeat-elk:
+    build:
+      context: ./docker/filebeat
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    container_name: filebeat-elk
+    restart: always
+    user: root
+    volumes:
+      - ./docker/filebeat/config/filebeat.elk.yml:/usr/share/filebeat/filebeat.yml
+      - ./volume/logs/mysql:/var/log/mysql
+    networks:
+      - elk
+  filebeat-graylog:
+    build:
+      context: ./docker/filebeat
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    container_name: filebeat-graylog
+    restart: always
+    user: root
+    volumes:
+      - ./docker/filebeat/config/filebeat.graylog.yml:/usr/share/filebeat/filebeat.yml
+      - ./volume/logs/mysql:/var/log/mysql
+    networks:
+      - graylog
+  elasticsearch:
+    build:
+      context: ./docker/elasticsearch
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    container_name: elasticsearch
+    volumes:
+      - ./docker/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro,z
+      - ./volume/data/elasticsearch:/usr/share/elasticsearch/data:z
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      ES_JAVA_OPTS: "-Xmx256m -Xms256m"
+      ELASTIC_PASSWORD: hsa13
+      discovery.type: single-node
+    networks:
+      - elk
+      - graylog
+  logstash:
+    build:
+      context: ./docker/logstash
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    container_name: logstash
+    volumes:
+      - ./docker/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro,z
+      - ./docker/logstash/pipeline:/usr/share/logstash/pipeline:ro,z
+    ports:
+      - "5044:5044"
+      - "5000:5000/tcp"
+      - "5000:5000/udp"
+      - "9600:9600"
+    environment:
+      LS_JAVA_OPTS: "-Xmx256m -Xms256m"
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+  kibana:
+    build:
+      context: ./docker/kibana
+      args:
+        ELK_VERSION: ${ELK_VERSION}
+    container_name: kibana
+    volumes:
+      - ./docker/kibana/config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro,z
+    ports:
+      - "5601:5601"
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+  mongo:
+    build: ./docker/mongo
+    container_name: mongo
+    volumes:
+      - ./volume/data/mongo:/data/db
+    ports:
+      - "${MONGODB_PORT}:27017"
+    networks:
+        - graylog
+  graylog:
+    image: graylog/graylog:4.2
+    container_name: graylog
+    environment:
+      - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD}
+      - GRAYLOG_ROOT_PASSWORD_SHA2=${GRAYLOG_SHA256_PASSWORD}
+      - GRAYLOG_HTTP_EXTERNAL_URI=http://127.0.0.1:9000/
+    entrypoint: /usr/bin/tini -- wait-for-it elastic:hsa13@elasticsearch:9200 --  /docker-entrypoint.sh
+    restart: always
+    volumes:
+      - ./docker/graylog/graylog.conf:/usr/share/graylog/data/config/graylog.conf
+    depends_on:
+      - mongo
+      - elasticsearch
+    ports:
+      # Graylog web interface and REST API
+      - "${GRAYLOG_PORT}:9000"
+      # Syslog TCP
+      - "${GRAYLOG_SYSLOG_TCP_PORT}:1514"
+      # Syslog UDP
+      - "${GRAYLOG_SYSLOG_UDP_PORT}:1514/udp"
+      # GELF TCP
+      - "${GRAYLOG_GELF_TCP_PORT}:12201"
+      # GELF UDP
+      - "${GRAYLOG_GELF_UDP_PORT}:12201/udp"
+      # BEATS TCP
+      - "${GRAYLOG_BEATS_PORT}:5045"
+    networks:
+      - graylog
